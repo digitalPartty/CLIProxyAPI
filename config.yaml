@@ -1,0 +1,22 @@
+# Placeholder config file for Railway deployment
+# This file will be replaced by actual configuration from:
+# 1. PostgreSQL store (recommended) - set PGSTORE_DSN environment variable
+# 2. Git store - set GITSTORE_GIT_URL environment variable
+# 3. Object store - set OBJECTSTORE_ENDPOINT environment variable
+# 4. Volume mount - mount actual config.yaml to /CLIProxyAPI/config.yaml
+
+host: ""
+port: 8317
+
+remote-management:
+  allow-remote: true
+  secret-key: ""
+
+auth-dir: "~/.cli-proxy-api"
+
+api-keys:
+  - "placeholder-key-change-me"
+
+debug: false
+commercial-mode: true
+logging-to-file: false

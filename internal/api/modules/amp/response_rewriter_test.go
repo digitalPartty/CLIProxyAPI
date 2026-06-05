@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -97,6 +98,221 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	expected := "data: {\"message\":{\"model\":\"claude-opus-4.5\",\"role\":\"assistant\"}}\n\n"
 	if string(result) != expected {
 		t.Errorf("expected %s, got %s", expected, string(result))
+	}
+}
+
+func TestRewriteStreamChunk_PreservesThinkingWithSignatureInjection(t *testing.T) {
+	rw := &ResponseRewriter{}
+
+	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	// Streaming mode preserves thinking blocks (does NOT suppress them)
+	// to avoid breaking SSE index alignment and TUI rendering
+	if !contains(result, []byte(`"content_block":{"type":"thinking"`)) {
+		t.Fatalf("expected thinking content_block_start to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"delta":{"type":"thinking_delta"`)) {
+		t.Fatalf("expected thinking_delta to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"type":"content_block_stop","index":0`)) {
+		t.Fatalf("expected content_block_stop for thinking block to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"content_block":{"type":"tool_use"`)) {
+		t.Fatalf("expected tool_use content_block frame to remain, got %s", string(result))
+	}
+	// Signature should be injected into both thinking and tool_use blocks
+	if count := strings.Count(string(result), `"signature":""`); count != 2 {
+		t.Fatalf("expected 2 signature injections, but got %d in %s", count, string(result))
+	}
+}
+
+func TestSanitizeAmpRequestBody_RemovesWhitespaceAndNonStringSignatures(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop-whitespace","signature":"   "},{"type":"thinking","thinking":"drop-number","signature":123},{"type":"thinking","thinking":"keep-valid","signature":"valid-signature"},{"type":"text","text":"keep-text"}]}]}`)
+	result := SanitizeAmpRequestBody(input)
+
+	if contains(result, []byte("drop-whitespace")) {
+		t.Fatalf("expected whitespace-only signature block to be removed, got %s", string(result))
+	}
+	if contains(result, []byte("drop-number")) {
+		t.Fatalf("expected non-string signature block to be removed, got %s", string(result))
+	}
+	if !contains(result, []byte("keep-valid")) {
+		t.Fatalf("expected valid thinking block to remain, got %s", string(result))
+	}
+	if !contains(result, []byte("keep-text")) {
+		t.Fatalf("expected non-thinking content to remain, got %s", string(result))
+	}
+}
+
+func TestSanitizeAmpRequestBody_StripsSignatureFromToolUseBlocks(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"thought","signature":"valid-sig"},{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"},"signature":""}]}]}`)
+	result := SanitizeAmpRequestBody(input)
+
+	if contains(result, []byte(`"signature":""`)) {
+		t.Fatalf("expected signature to be stripped from tool_use block, got %s", string(result))
+	}
+	if !contains(result, []byte(`"valid-sig"`)) {
+		t.Fatalf("expected thinking signature to remain, got %s", string(result))
+	}
+	if !contains(result, []byte(`"tool_use"`)) {
+		t.Fatalf("expected tool_use block to remain, got %s", string(result))
+	}
+}
+
+func TestSanitizeAmpRequestBody_MixedInvalidThinkingAndToolUseSignature(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop-me","signature":""},{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"},"signature":""}]}]}`)
+	result := SanitizeAmpRequestBody(input)
+
+	if contains(result, []byte("drop-me")) {
+		t.Fatalf("expected invalid thinking block to be removed, got %s", string(result))
+	}
+	if contains(result, []byte(`"signature"`)) {
+		t.Fatalf("expected signature to be stripped from tool_use block, got %s", string(result))
+	}
+	if !contains(result, []byte(`"tool_use"`)) {
+		t.Fatalf("expected tool_use block to remain, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_NonStreaming(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"bash","input":{"cmd":"ls"}},{"type":"tool_use","id":"toolu_02","name":"read","input":{"path":"/tmp"}},{"type":"text","text":"hello"}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if !contains(result, []byte(`"name":"Bash"`)) {
+		t.Errorf("expected bash->Bash, got %s", string(result))
+	}
+	if !contains(result, []byte(`"name":"Read"`)) {
+		t.Errorf("expected read->Read, got %s", string(result))
+	}
+	if contains(result, []byte(`"name":"bash"`)) {
+		t.Errorf("expected lowercase bash to be replaced, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_Streaming(t *testing.T) {
+	input := []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"grep","id":"toolu_01","input":{}}}`)
+	result := normalizeAmpToolNames(input)
+
+	if !contains(result, []byte(`"name":"Grep"`)) {
+		t.Errorf("expected grep->Grep in streaming, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_AlreadyCorrect(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if string(result) != string(input) {
+		t.Errorf("expected no modification for correctly-cased tool, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_GlobPreserved(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if string(result) != string(input) {
+		t.Errorf("expected glob to remain lowercase, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_RequestToolCasing_NonStreaming(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`)
+	result := normalizeAmpToolNamesForRequest(input, map[string]string{"glob": "Glob"})
+
+	if !contains(result, []byte(`"name":"Glob"`)) {
+		t.Errorf("expected glob->Glob when request advertised Glob, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_RequestToolCasing_Streaming(t *testing.T) {
+	input := []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"glob","id":"toolu_01","input":{}}}`)
+	result := normalizeAmpToolNamesForRequest(input, map[string]string{"glob": "Glob"})
+
+	if !contains(result, []byte(`"name":"Glob"`)) {
+		t.Errorf("expected glob->Glob in streaming when request advertised Glob, got %s", string(result))
+	}
+}
+
+func TestResponseRewriter_RequestToolCasingFromBody(t *testing.T) {
+	requestBody := []byte(`{"tools":[{"name":"Glob","input_schema":{"type":"object"}}]}`)
+	rw := &ResponseRewriter{requestToolNames: collectRequestToolNames(requestBody)}
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`)
+
+	result := rw.rewriteModelInResponse(input)
+
+	if !contains(result, []byte(`"name":"Glob"`)) {
+		t.Errorf("expected request body casing to restore glob->Glob, got %s", string(result))
+	}
+}
+
+func TestResponseRewriter_LowercaseNativeRequestPreserved(t *testing.T) {
+	requestBody := []byte(`{"tools":[{"name":"glob","input_schema":{"type":"object"}}]}`)
+	rw := &ResponseRewriter{requestToolNames: collectRequestToolNames(requestBody)}
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`)
+
+	result := rw.rewriteModelInResponse(input)
+
+	if string(result) == string(input) {
+		return
+	}
+	if !contains(result, []byte(`"name":"glob"`)) {
+		t.Errorf("expected lowercase-native request to preserve glob, got %s", string(result))
+	}
+}
+
+func TestCollectRequestToolNames_CollisionIgnored(t *testing.T) {
+	tests := []struct {
+		requestBody []byte
+		input       []byte
+		forbidden   []byte
+	}{
+		{
+			requestBody: []byte(`{"tools":[{"name":"Glob","input_schema":{"type":"object"}},{"name":"glob","input_schema":{"type":"object"}}]}`),
+			input:       []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`),
+			forbidden:   []byte(`"name":"Glob"`),
+		},
+		{
+			requestBody: []byte(`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"Glob","input_schema":{"type":"object"}}]}`),
+			input:       []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`),
+			forbidden:   []byte(`"name":"Glob"`),
+		},
+		{
+			requestBody: []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"name":"bash","input_schema":{"type":"object"}}]}`),
+			input:       []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"bash","input":{"cmd":"ls"}}]}`),
+			forbidden:   []byte(`"name":"Bash"`),
+		},
+	}
+
+	for _, tt := range tests {
+		rw := &ResponseRewriter{requestToolNames: collectRequestToolNames(tt.requestBody)}
+		result := rw.rewriteModelInResponse(tt.input)
+
+		if contains(result, tt.forbidden) {
+			t.Errorf("expected conflicting tool casing not to force %s, got %s", string(tt.forbidden), string(result))
+		}
+	}
+}
+
+func TestResponseRewriter_RequestToolCasingFromBody_Streaming(t *testing.T) {
+	requestBody := []byte(`{"tools":[{"name":"Glob","input_schema":{"type":"object"}}]}`)
+	rw := &ResponseRewriter{requestToolNames: collectRequestToolNames(requestBody)}
+	input := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"glob\",\"id\":\"toolu_01\",\"input\":{}}}\n\n")
+
+	result := rw.rewriteStreamChunk(input)
+
+	if !contains(result, []byte(`"name":"Glob"`)) {
+		t.Errorf("expected streaming response to restore glob->Glob from request body, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_UnknownToolUntouched(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"edit_file","input":{"path":"/tmp/x"}}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if string(result) != string(input) {
+		t.Errorf("expected no modification for unknown tool, got %s", string(result))
 	}
 }
 

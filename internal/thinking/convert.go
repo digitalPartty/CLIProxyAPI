@@ -3,7 +3,7 @@ package thinking
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 )
 
 // levelToBudgetMap defines the standard Level → Budget mapping.
@@ -16,6 +16,9 @@ var levelToBudgetMap = map[string]int{
 	"medium":  8192,
 	"high":    24576,
 	"xhigh":   32768,
+	// "max" is used by Claude adaptive thinking effort. We map it to a large budget
+	// and rely on per-model clamping when converting to budget-only providers.
+	"max": 128000,
 }
 
 // ConvertLevelToBudget converts a thinking level to a budget value.
@@ -31,6 +34,7 @@ var levelToBudgetMap = map[string]int{
 //   - medium  → 8192
 //   - high    → 24576
 //   - xhigh   → 32768
+//   - max     → 128000
 //
 // Returns:
 //   - budget: The converted budget value
@@ -92,6 +96,43 @@ func ConvertBudgetToLevel(budget int) (string, bool) {
 	}
 }
 
+// HasLevel reports whether the given target level exists in the levels slice.
+// Matching is case-insensitive with leading/trailing whitespace trimmed.
+func HasLevel(levels []string, target string) bool {
+	for _, level := range levels {
+		if strings.EqualFold(strings.TrimSpace(level), target) {
+			return true
+		}
+	}
+	return false
+}
+
+// MapToClaudeEffort maps a generic thinking level string to a Claude adaptive
+// thinking effort value (low/medium/high/max).
+//
+// supportsMax indicates whether the target model supports "max" effort.
+// Returns the mapped effort and true if the level is valid, or ("", false) otherwise.
+func MapToClaudeEffort(level string, supportsMax bool) (string, bool) {
+	level = strings.ToLower(strings.TrimSpace(level))
+	switch level {
+	case "":
+		return "", false
+	case "minimal":
+		return "low", true
+	case "low", "medium", "high":
+		return level, true
+	case "xhigh", "max":
+		if supportsMax {
+			return "max", true
+		}
+		return "high", true
+	case "auto":
+		return "high", true
+	default:
+		return "", false
+	}
+}
+
 // ModelCapability describes the thinking format support of a model.
 type ModelCapability int
 
@@ -114,7 +155,7 @@ const (
 // It analyzes the model's ThinkingSupport configuration to classify the model:
 //   - CapabilityNone: modelInfo.Thinking is nil (model doesn't support thinking)
 //   - CapabilityBudgetOnly: Has Min/Max but no Levels (Claude, Gemini 2.5)
-//   - CapabilityLevelOnly: Has Levels but no Min/Max (OpenAI, iFlow)
+//   - CapabilityLevelOnly: Has Levels but no Min/Max (OpenAI, Codex, Kimi)
 //   - CapabilityHybrid: Has both Min/Max and Levels (Gemini 3)
 //
 // Note: Returns a special sentinel value when modelInfo itself is nil (unknown model).

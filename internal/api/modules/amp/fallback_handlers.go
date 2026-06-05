@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -122,6 +122,10 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			handler(c)
 			return
 		}
+
+		// Sanitize request body: remove thinking blocks with invalid signatures
+		// to prevent upstream API 400 errors
+		bodyBytes = SanitizeAmpRequestBody(bodyBytes)
 
 		// Restore the body for the handler to read
 		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -248,7 +252,8 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// Log: Model was mapped to another model
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := NewResponseRewriter(c.Writer, modelName)
+			rewriter := NewResponseRewriterForRequest(c.Writer, modelName, bodyBytes)
+			rewriter.suppressThinking = true
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
@@ -259,10 +264,17 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
+			// Wrap with ResponseRewriter for local providers too, because upstream
+			// proxies (e.g. NewAPI) may return a different model name and lack
+			// Amp-required fields like thinking.signature.
+			rewriter := NewResponseRewriterForRequest(c.Writer, modelName, bodyBytes)
+			rewriter.suppressThinking = providerName != "claude"
+			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
+			rewriter.Flush()
 		} else {
 			// No provider, no mapping, no proxy: fall back to the wrapped handler so it can return an error response
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))

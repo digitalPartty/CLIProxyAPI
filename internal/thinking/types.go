@@ -1,10 +1,10 @@
 // Package thinking provides unified thinking configuration processing.
 //
 // This package offers a unified interface for parsing, validating, and applying
-// thinking configurations across various AI providers (Claude, Gemini, OpenAI, iFlow).
+// thinking configurations across various AI providers (Claude, Gemini, OpenAI, Codex, Antigravity, Kimi, xAI).
 package thinking
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 
 // ThinkingMode represents the type of thinking configuration mode.
 type ThinkingMode int
@@ -54,6 +54,9 @@ const (
 	LevelHigh ThinkingLevel = "high"
 	// LevelXHigh sets extra-high thinking effort
 	LevelXHigh ThinkingLevel = "xhigh"
+	// LevelMax sets maximum thinking effort.
+	// This is currently used by Claude 4.6 adaptive thinking (opus supports "max").
+	LevelMax ThinkingLevel = "max"
 )
 
 // ThinkingConfig represents a unified thinking configuration.

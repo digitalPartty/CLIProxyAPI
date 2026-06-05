@@ -17,21 +17,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
 const (
-	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion        = "v1internal"
-	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
-	geminiCLIApiClient      = "gl-node/22.17.0"
-	geminiCLIClientMetadata = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+	geminiCLIEndpoint = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion  = "v1internal"
 )
 
 type projectSelectionRequiredError struct{}
@@ -335,42 +333,10 @@ func performGeminiCLISetup(ctx context.Context, httpClient *http.Client, storage
 			finalProjectID := projectID
 			if responseProjectID != "" {
 				if explicitProject && !strings.EqualFold(responseProjectID, projectID) {
-					// Check if this is a free user (gen-lang-client projects or free/legacy tier)
-					isFreeUser := strings.HasPrefix(projectID, "gen-lang-client-") ||
-						strings.EqualFold(tierID, "FREE") ||
-						strings.EqualFold(tierID, "LEGACY")
-
-					if isFreeUser {
-						// Interactive prompt for free users
-						fmt.Printf("\nGoogle returned a different project ID:\n")
-						fmt.Printf("  Requested (frontend): %s\n", projectID)
-						fmt.Printf("  Returned (backend):   %s\n\n", responseProjectID)
-						fmt.Printf("  Backend project IDs have access to preview models (gemini-3-*).\n")
-						fmt.Printf("  This is normal for free tier users.\n\n")
-						fmt.Printf("Which project ID would you like to use?\n")
-						fmt.Printf("  [1] Backend (recommended): %s\n", responseProjectID)
-						fmt.Printf("  [2] Frontend: %s\n\n", projectID)
-						fmt.Printf("Enter choice [1]: ")
-
-						reader := bufio.NewReader(os.Stdin)
-						choice, _ := reader.ReadString('\n')
-						choice = strings.TrimSpace(choice)
-
-						if choice == "2" {
-							log.Infof("Using frontend project ID: %s", projectID)
-							fmt.Println(". Warning: Frontend project IDs may not have access to preview models.")
-							finalProjectID = projectID
-						} else {
-							log.Infof("Using backend project ID: %s (recommended)", responseProjectID)
-							finalProjectID = responseProjectID
-						}
-					} else {
-						// Pro users: keep requested project ID (original behavior)
-						log.Warnf("Gemini onboarding returned project %s instead of requested %s; keeping requested project ID.", responseProjectID, projectID)
-					}
-				} else {
-					finalProjectID = responseProjectID
+					log.Infof("Gemini onboarding: requested project %s maps to backend project %s", projectID, responseProjectID)
+					log.Infof("Using backend project ID: %s", responseProjectID)
 				}
+				finalProjectID = responseProjectID
 			}
 
 			storage.ProjectID = strings.TrimSpace(finalProjectID)
@@ -409,9 +375,7 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return fmt.Errorf("create request: %w", errRequest)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", geminiCLIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", geminiCLIApiClient)
-	req.Header.Set("Client-Metadata", geminiCLIClientMetadata)
+	req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -630,7 +594,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
@@ -651,7 +615,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 		resp, errDo = httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
